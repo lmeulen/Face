@@ -6,6 +6,63 @@ import numpy as np
 import utils.utils as utls
 
 
+class FaceDetector:
+    # Shape predictor model from DLIB
+    # source: https://github.com/davisking/dlib-models
+    SHAPE_MODEL = "models\shape_predictor_68_face_landmarks.dat"
+
+    detector = None
+    predictor = None
+
+    def __init__(self):
+        self.detector = dlib.get_frontal_face_detector()
+        self.predictor = dlib.shape_predictor(self.SHAPE_MODEL)
+
+    @staticmethod
+    def equalize_image(image):
+        """
+        Apply Global Histogram Equalization
+        In order to increase cotrast
+
+        :param image: original image
+        :return normalized image (grayscale)
+        """
+        gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+        histogram = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+        return histogram.apply(gray)
+
+    def detect_faces(self, image):
+        """
+        Detect faces. Faces are returned as a list
+        :param image: Image
+        :return: faces
+        """
+        image_new = image.copy()
+        image_new = self.equalize_image(image_new)
+        # Detect the faces in the image
+        detected_faces = self.detector(image_new, 1)
+        faces = []
+        for k, face in enumerate(detected_faces):
+            # Find landmarks
+            landmarks = self.predictor(image_new, face)
+            f = Face(landmarks)
+            faces.append(f)
+        return faces
+
+    def get_face(self, image):
+        """
+        Detect face. If more faces found, the first from the list
+        is returned
+        :param image: Image
+        :return: face
+        """
+        faces = self.detect_faces(image)
+        face = None
+        if len(faces) > 0:
+            face = faces[0]
+        return face
+
+
 class Face:
     # For dlib’s 68-point facial landmark detector:
     LANDMARK_68_IDXS = OrderedDict([
@@ -32,13 +89,23 @@ class Face:
     def __init__(self, landmarks=None):
         self.set_landmarks(landmarks)
 
+    def contains_face(self):
+        """
+        Returns true if this instance contains a face
+        :return: True if face present
+        """
+        return self.landmarks is None
+
     def set_landmarks(self, landmarks):
         """
         Set new landmarks, landmarks are stored as a numpy array
         :landmarks array of landmarks
         :image image containing the face
         """
-        self.landmarks = self.shape_to_np(landmarks)
+        if not landmarks is None:
+            self.landmarks = self.shape_to_np(landmarks)
+        else:
+            self.landmarks = None
         self.center_of_gravity = None
         self.left_center = None
         self.right_center = None
@@ -67,7 +134,7 @@ class Face:
 
     def get_center_of_gravity(self):
         """
-        Get the center of gravity
+        Get the center of gravity of the face
         :return center of gravity (x,y)
         """
         if self.center_of_gravity is None:
@@ -76,7 +143,8 @@ class Face:
             self.center_of_gravity = (int(np.mean(xlist)), int(np.mean(ylist)))
         return self.center_of_gravity
 
-    def blur_face(self, image, factor=3.0, blur=(23, 23)):
+    # noinspection PyArgumentList
+    def blur_face(self, image, factor=3.0, blur=(30, 30)):
         """
         Blur the face in the image. The extracted face ellipse
         will be used for masking
@@ -94,9 +162,10 @@ class Face:
         (cx, cy, a, b, angle) = self.get_face_ellipse()
         a = a * factor
         b = b * factor
-        # blur the complete image
+        # blur the total image
         temp_img = cv2.blur(temp_img, blur)
         # create the circle in the mask and in the tempImg, notice the one in the mask is full
+        # noinspection PyArgumentList
         cv2.ellipse(temp_img, ((cx, cy), (a, b), angle), (0, 255, 0), 0)
         cv2.ellipse(mask, ((cx, cy), (a - 3, b - 3), angle), (255), -1)
 
@@ -277,34 +346,70 @@ class Face:
         # return the aligned face
         return face
 
-    def calculate_delaunay_triangles(self, image):
-        """
-        Calculate the delauny triangles
-        :return list of triangles ((x1,y1), (x2,y2), (x3,y3))).
-        """
+    @staticmethod
+    def calculate_delaunay_triangles_points_from_rect(rect, points):
+        # create subdiv
+        subdiv = cv2.Subdiv2D(rect)
+        # Insert points into subdiv
+        for p in points:
+            subdiv.insert(p)
+        triangle_list = subdiv.getTriangleList()
         triangles = []
-        if self.triangles is None:
-            height, width = image.shape[:2]
-            rect = (0, 0, width, height)
-            # Create subdiv
-            subdiv = cv2.Subdiv2D(rect)
-            # Insert points into subdiv
-            points = self.landmarks
-            for p in points:
-                subdiv.insert((p[0], p[1]))
-            # List of triangles. Each triangle is a list of 3 points ( 6 numbers )
-            trianglelist = subdiv.getTriangleList()
-            # Find the indices of triangles in the points array
-            for t in trianglelist:
-                pt1 = (t[0], t[1])
-                pt2 = (t[2], t[3])
-                pt3 = (t[4], t[5])
-                if utls.rect_contains(rect, pt1) and utls.rect_contains(rect, pt2) and utls.rect_contains(rect, pt3):
-                    triangles.append((pt1, pt2, pt3))
-            self.triangles = triangles
+        for t in triangle_list:
+            pt = [(t[0], t[1]), (t[2], t[3]), (t[4], t[5])]
+            pt1 = (t[0], t[1])
+            pt2 = (t[2], t[3])
+            pt3 = (t[4], t[5])
+            if utls.rect_contains(rect, pt1) and utls.rect_contains(rect, pt2) and utls.rect_contains(rect, pt3):
+                ind = []
+                # Get face-points (from 68 face detector) by coordinates
+                for j in range(0, 3):
+                    for k in range(0, len(points)):
+                        if abs(pt[j][0] - points[k][0]) < 1.0 and abs(pt[j][1] - points[k][1]) < 1.0:
+                            ind.append(k)
+                if len(ind) == 3:
+                    triangles.append((ind[0], ind[1], ind[2]))
         return triangles
 
+    @staticmethod
+    def calculate_delaunay_triangles_from_rect(rect, points):
+        triangles = []
+        # Create subdiv
+        subdiv = cv2.Subdiv2D(rect)
+        # Insert points into subdiv
+        for p in points:
+            subdiv.insert((p[0], p[1]))
+        # List of triangles. Each triangle is a list of 3 points ( 6 numbers )
+        trianglelist = subdiv.getTriangleList()
+        # Find the indices of triangles in the points array
+        for t in trianglelist:
+            pt1 = (t[0], t[1])
+            pt2 = (t[2], t[3])
+            pt3 = (t[4], t[5])
+            if utls.rect_contains(rect, pt1) and utls.rect_contains(rect, pt2) and utls.rect_contains(rect, pt3):
+                triangles.append((pt1, pt2, pt3))
+        return triangles
+
+    def calculate_delaunay_triangles(self, image):
+        """
+        Calculate the delauny triangles for internal stored points
+        :return list of triangles ((x1,y1), (x2,y2), (x3,y3))).
+        """
+        if self.triangles is None:
+            points = self.landmarks
+            height, width = image.shape[:2]
+            rect = (0, 0, width, height)
+            triangles = self.calculate_delaunay_triangles_from_rect(rect, points)
+            self.triangles = triangles
+        return self.triangles
+
     def draw_delaunay(self, image, color=(0, 255, 0)):
+        """
+        Draa the delaunay triangles on the given image
+        :param image: Image to draw the triangles on
+        :param color: Color of the triangles, default green
+        :return:
+        """
 
         trianglelist = self.calculate_delaunay_triangles(image)
         size = image.shape
@@ -397,41 +502,126 @@ class Face:
                 cv2.line(frame, pt3, pt1, color, 1, cv2.LINE_AA, 0)
         return frame
 
-
-class FaceDetector:
-    # Shape predictor model from DLIB
-    # source: https://github.com/davisking/dlib-models
-    SHAPE_MODEL = "models\shape_predictor_68_face_landmarks.dat"
-
-    detector = None
-    predictor = None
-
-    def __init__(self):
-        self.detector = dlib.get_frontal_face_detector()
-        self.predictor = dlib.shape_predictor(self.SHAPE_MODEL)
-
+    # Apply affine transform calculated using srcTri and dstTri to src and
+    # output an image of size.
     @staticmethod
-    def equalize_image(image):
+    def apply_affine_transform(image, src_triangle, dest_triangle, size):
         """
-        Apply Global Histogram Equalization
-        In order to increase cotrast
-
-        :param image: original image
-        :return normalized image (grayscale)
+        Perform a warp affine transformation. De transformation is calculated
+        using the source and destination triange
+        :param image: Source image
+        :param src_triangle: Source triangle
+        :param dest_triangle: Destination triangle
+        :param size: Size of the output image
+        :return: image of specified size with transformation applies
         """
-        gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
-        histogram = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
-        return histogram.apply(gray)
 
-    def detect_faces(self, image_org):
-        image = image_org.copy()
-        image = self.equalize_image(image)
-        # Detect the faces in the image
-        detected_faces = self.detector(image, 1)
-        faces = []
-        for k, face in enumerate(detected_faces):
-            # Find landmarks
-            landmarks = self.predictor(image, face)
-            f = Face(landmarks)
-            faces.append(f)
-        return faces
+        # Find the affine transform. based on the source and destination triangles
+        warp_matrix = cv2.getAffineTransform(np.float32(src_triangle), np.float32(dest_triangle))
+
+        # Apply the transform on the source image
+        return cv2.warpAffine(image, warp_matrix, (size[0], size[1]), None, flags=cv2.INTER_LINEAR,
+                              borderMode=cv2.BORDER_REFLECT_101)
+
+    def warp_triangle(self, src_image, dest_image, src_triangles, dest_triangles):
+        """
+        Warp triangle region from source image to destination image.
+        Perform alpha blend
+        :param src_image: Source image
+        :param dest_image: Destination image
+        :param src_triangles: Source triangles
+        :param dest_triangles: Destination triangles
+        :return:
+        """
+        # Find bounding rectangle for each triangle
+        s_rec = cv2.boundingRect(np.float32([src_triangles]))
+        d_rec = cv2.boundingRect(np.float32([dest_triangles]))
+
+        # Offset points by left top corner of the respective rectangles
+        s_rect = []
+        d_rect = []
+        d_rect_inv = []
+
+        for i in range(0, 3):
+            s_rect.append(((src_triangles[i][0] - s_rec[0]), (src_triangles[i][1] - s_rec[1])))
+            d_rect.append(((dest_triangles[i][0] - d_rec[0]), (dest_triangles[i][1] - d_rec[1])))
+            d_rect_inv.append(((dest_triangles[i][0] - d_rec[0]), (dest_triangles[i][1] - d_rec[1])))
+
+        # Get mask by filling triangle
+        mask = np.zeros((d_rec[3], d_rec[2], 3), dtype=np.float32)
+        cv2.fillConvexPoly(mask, np.int32(d_rect_inv), (1.0, 1.0, 1.0), 16, 0)
+
+        # Apply warpImage to small rectangular patches
+        src_rect = src_image[s_rec[1]:s_rec[1] + s_rec[3], s_rec[0]:s_rec[0] + s_rec[2]]
+
+        size = (d_rec[2], d_rec[3])
+        dest_rect = self.apply_affine_transform(src_rect, s_rect, d_rect, size)
+        dest_rect = dest_rect * mask
+
+        # Copy triangular region of the rectangular patch to the output image
+        dest_image[d_rec[1]:d_rec[1] + d_rec[3], d_rec[0]:d_rec[0] + d_rec[2]] = \
+            dest_image[d_rec[1]:d_rec[1] + d_rec[3], d_rec[0]:d_rec[0] + d_rec[2]] * ((1.0, 1.0, 1.0) - mask)
+
+        dest_image[d_rec[1]:d_rec[1] + d_rec[3], d_rec[0]:d_rec[0] + d_rec[2]] = \
+            dest_image[d_rec[1]:d_rec[1] + d_rec[3], d_rec[0]:d_rec[0] + d_rec[2]] + dest_rect
+
+    def swap_face(self, image, image_new_face, new_face):
+        """
+        Swap face in pictures
+        :param image: Original image with face to be replaced
+        :param image_new_face: Image containing the new face
+        :param new_face: Face specification of the new face
+        :return: Original image with replaced face
+        """
+        image_result = np.copy(image)
+
+        # Read array of corresponding points
+        points_from = new_face.landmarks
+        points_to = self.landmarks
+
+        # Find convex hull
+        hull_from = []
+        hull_to = []
+
+        hull_idxs = cv2.convexHull(points_to, returnPoints=False)
+
+        for i in range(0, len(hull_idxs)):
+            idx = int(hull_idxs[i])
+            hull_from.append((points_from[idx][0], points_from[idx][1]))
+            hull_to.append((points_to[idx][0], points_to[idx][1]))
+
+        # Find delanauy traingulation for convex hull points
+        rect = (0, 0, image.shape[1], image.shape[0])
+
+        temp_face = Face()
+        dt = temp_face.calculate_delaunay_triangles_points_from_rect(rect, hull_to)
+        print(dt)
+        if len(dt) == 0:
+            return image.copy()
+
+        # Apply affine transformation to all Delaunay triangles
+        for i in range(0, len(dt)):
+            t1 = []
+            t2 = []
+            # get points for img1, img2 corresponding to the triangles
+            for j in range(0, 3):
+                t1.append(hull_from[dt[i][j]])
+                t2.append(hull_to[dt[i][j]])
+            temp_face.warp_triangle(image_new_face, image_result, t1, t2)
+
+        # Calculate Mask
+        hull8u = []
+        for i in range(0, len(hull_to)):
+            hull8u.append((hull_to[i][0], hull_to[i][1]))
+
+        mask = np.zeros(image.shape, dtype=image.dtype)
+
+        cv2.fillConvexPoly(mask, np.int32(hull8u), (255, 255, 255))
+        cv2.imshow("Mask", mask)
+
+        r = cv2.boundingRect(np.float32([hull_to]))
+
+        center = (r[0] + int(r[2] / 2), r[1] + int(r[3] / 2))
+
+        # Clone seamlessly.
+        return cv2.seamlessClone(np.uint8(image_result), image, mask, center, cv2.NORMAL_CLONE)

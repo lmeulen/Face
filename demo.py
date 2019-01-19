@@ -21,7 +21,7 @@ def process_frame(image, detector, overlay=True):
         # f.draw_landmarks(edit_image, dots=True, lines=True, cog=True, face_ellipse=True, eyes=True, cog_lines=True)
         f.draw_landmarks(edit_image, face_ellipse=True)
         # f.cover_eyes(edit_image)
-        #f.draw_delaunay(edit_image)
+        f.draw_delaunay(edit_image)
 
         # Extract and show image
         # face_image = f.extract_aligned_face(original)
