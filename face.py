@@ -76,6 +76,38 @@ class Face:
             self.center_of_gravity = (int(np.mean(xlist)), int(np.mean(ylist)))
         return self.center_of_gravity
 
+    def blur_face(self, image, factor=3.0, blur=(23, 23)):
+        """
+        Blur the face in the image. The extracted face ellipse
+        will be used for masking
+        :param image: original image
+        :param factor: Factor to increase the face ellipse before blurring. 1.0 equals original size
+        :param blur: blur factor, default (23, 23)
+        :return: image with blurred face
+        """
+
+        # create a temp image and a mask to work on
+        temp_img = image.copy()
+        mask = np.full((image.shape[0], image.shape[1], 1), 0, dtype=np.uint8)
+
+        # ellipse to blur
+        (cx, cy, a, b, angle) = self.get_face_ellipse()
+        a = a * factor
+        b = b * factor
+        # blur the complete image
+        temp_img = cv2.blur(temp_img, blur)
+        # create the circle in the mask and in the tempImg, notice the one in the mask is full
+        cv2.ellipse(temp_img, ((cx, cy), (a, b), angle), (0, 255, 0), 0)
+        cv2.ellipse(mask, ((cx, cy), (a - 3, b - 3), angle), (255), -1)
+
+        # Apply the mask
+        mask_inv = cv2.bitwise_not(mask)
+        background = cv2.bitwise_and(image, image, mask=mask_inv)
+        foreground = cv2.bitwise_and(temp_img, temp_img, mask=mask)
+        dst = cv2.add(foreground, background)
+
+        return dst
+
     def cover_eyes(self, image):
         """
         Cover the eyes with a black bar. Rectangle covers
@@ -121,7 +153,8 @@ class Face:
             ellipse = utls.fit_ellipse(jawline)
             self.ellipse = list(map(int, ellipse))
             # Surrounding ellipse  [cx,cy,a,b,angle]
-            return self.ellipse
+            print(self.ellipse)
+        return self.ellipse
 
     def draw_landmarks(self, image, line_color=(0, 255, 0), dots_color=(0, 255, 0), dots=False,
                        lines=False, cog=False, face_ellipse=False, eyes=False, cog_lines=False, copy=False):
@@ -308,6 +341,9 @@ class Face:
         Normalize triangle so they are located top left
         :return normalized triangles
         """
+        if self.triangles is None:
+            return None
+
         min_width = min_height = 1000
         max_width = max_height = 0
         for tr in self.triangles:
@@ -325,6 +361,15 @@ class Face:
         return norm_tr
 
     def exploded_view_delaunay(self, image, size=250, factor=1, color=(0, 255, 0)):
+        """
+        Return an image with an exploded view of the delaunay triangles
+        This helps understanding the triangles layout
+        :param image: Image containing the face (only used when triangles not calculated before)
+        :param size: Size of the target image
+        :param factor: Explosion factor, higher puts more space between triangles
+        :param color: color of the triangles
+        :return: image with exploded view
+        """
         h = w = size
         height = h + int((factor * h)) + 1
         width = w + int((factor * w)) + 1
